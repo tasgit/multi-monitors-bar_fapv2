@@ -21,6 +21,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import { ANIMATION_TIME } from 'resource:///org/gnome/shell/ui/overview.js';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as PanelModule from 'resource:///org/gnome/shell/ui/panel.js';
+import * as LoginManager from 'resource:///org/gnome/shell/misc/loginManager.js';
 
 // Shell version for feature detection - centralized here and exported for other modules
 
@@ -56,6 +57,7 @@ export default class MultiMonitorsExtension extends Extension {
 		this._showPanelId = null;
 		this._thumbnailsSliderPositionId = null;
 		this._relayoutId = null;
+		this._prepareForSleepId = null;
 	}
 
 	_showThumbnailsSlider() {
@@ -201,6 +203,19 @@ export default class MultiMonitorsExtension extends Extension {
 		this._relayoutId = Main.layoutManager.connect('monitors-changed', this._relayout.bind(this));
 		this._relayout();
 
+		// Proactively tear down extra panels before suspend so the lock
+		// screen on wake gets correct single-monitor geometry.
+		try {
+			const loginMgr = LoginManager.getLoginManager();
+			this._prepareForSleepId = loginMgr.connect('prepare-for-sleep',
+				(mgr, aboutToSuspend) => {
+					if (aboutToSuspend)
+						this._onPrepareForSleep();
+				});
+		} catch (e) {
+			log('[MultiMonitors] Could not connect prepare-for-sleep: ' + e);
+		}
+
 		mmPanel.length = 0;
 		MMLayout.setMMPanelArrayRef(mmPanel);
 		MMPanel.setMMPanelArrayRef(mmPanel);
@@ -227,9 +242,36 @@ export default class MultiMonitorsExtension extends Extension {
 		ScreenshotPatch.patchScreenshotUI(this._settings);
 	}
 
+	/**
+	 * Called just before the system suspends.  Tear down all extra-monitor
+	 * chrome so GNOME Shell's layout regions are clean when the lock
+	 * screen dialog is positioned on wake.
+	 */
+	_onPrepareForSleep() {
+		log('[MultiMonitors] _onPrepareForSleep: cleaning up before suspend');
+		if (mmLayoutManager) {
+			mmLayoutManager.hidePanel();
+			mmLayoutManager = null;
+		}
+		this._hideThumbnailsSlider();
+		this._mmMonitors = 0;
+		this._primaryIndex = -1;
+		mmPanel.length = 0;
+	}
+
 	disable() {
 		// Unpatch screenshot UI
 		ScreenshotPatch.unpatchScreenshotUI();
+
+		if (this._prepareForSleepId) {
+			try {
+				const loginMgr = LoginManager.getLoginManager();
+				loginMgr.disconnect(this._prepareForSleepId);
+			} catch (e) {
+				// Ignore
+			}
+			this._prepareForSleepId = null;
+		}
 
 		if (this._relayoutId) {
 			Main.layoutManager.disconnect(this._relayoutId);

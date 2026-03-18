@@ -64,6 +64,13 @@ export class MultiMonitorsPanelBox {
 	}
 
 	destroy() {
+		// Explicitly removeChrome before destroy so struts are cleared
+		// synchronously — prevents stale geometry on suspend/wake.
+		try {
+			Main.layoutManager.removeChrome(this.panelBox);
+		} catch (e) {
+			// Already untracked or destroyed
+		}
 		this.panelBox.destroy();
 	}
 
@@ -73,6 +80,30 @@ export class MultiMonitorsPanelBox {
 		const mainPanelHeight = Main.layoutManager.panelBox.height;
 		// Lock the height instead of using -1 (auto)
 		this.panelBox.set_size(monitor.width, mainPanelHeight > 0 ? mainPanelHeight : 30);
+	}
+}
+
+/**
+ * Force a synchronous layout region update so struts/work-areas are
+ * recalculated immediately rather than waiting for the next idle.
+ * This is critical to prevent the lock screen from using stale geometry.
+ */
+function _forceUpdateRegions() {
+	try {
+		// Try the synchronous private method first
+		if (typeof Main.layoutManager._updateRegions === 'function') {
+			Main.layoutManager._updateRegions();
+			return;
+		}
+	} catch (e) {
+		// Fall through to alternatives
+	}
+	try {
+		// Fallback: queue the update (async, but better than nothing)
+		if (typeof Main.layoutManager._queueUpdateRegions === 'function')
+			Main.layoutManager._queueUpdateRegions();
+	} catch (e) {
+		// Ignore
 	}
 }
 
@@ -302,6 +333,11 @@ export class MultiMonitorsLayoutManager {
 			this._monitorIds.pop();
 			this._popPanel();
 		}
+
+		// Force synchronous region update so the lock screen
+		// (shown immediately after disable) uses correct geometry.
+		if (panels2remove > 0)
+			_forceUpdateRegions();
 	}
 
 	_monitorsChanged() {
@@ -317,6 +353,9 @@ export class MultiMonitorsLayoutManager {
 				this._monitorIds.pop();
 				this._popPanel();
 			}
+
+			// Force synchronous layout recalculation.
+			_forceUpdateRegions();
 
 			// Rebuild from scratch for all non-primary monitors
 			for (let i = 0; i < Main.layoutManager.monitors.length; i++) {
@@ -342,6 +381,8 @@ export class MultiMonitorsLayoutManager {
 				this._monitorIds.pop();
 				this._popPanel();
 			}
+			// Force synchronous layout recalculation.
+			_forceUpdateRegions();
 		}
 
 		let j = 0;
