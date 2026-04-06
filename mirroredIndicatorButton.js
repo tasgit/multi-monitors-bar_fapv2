@@ -160,6 +160,21 @@ export const MirroredIndicatorButton = GObject.registerClass(
                     return;
                 }
 
+                // Astra Monitor: Treat as independent multi-component container 
+                // so components have separate hover and interaction.
+                if (this._role && this._role.toLowerCase().includes('astra')) {
+                    this.add_style_class_name('mm-astra-monitor');
+                    this.y_expand = true;
+                    this.y_align = Clutter.ActorAlign.FILL;
+                    
+                    // Crucial: remove base panel-button so the whole thing doesn't 
+                    // light up like one giant button.
+                    this.remove_style_class_name('panel-button');
+                    
+                    this._createAstraMultiComponentClone(sourceChild);
+                    return;
+                }
+
                 // 1. Quick Settings (Handle explicitly regardless of structure)
                 if (this._role === 'quickSettings') {
                     this.add_style_class_name('mm-quick-settings');
@@ -294,7 +309,7 @@ export const MirroredIndicatorButton = GObject.registerClass(
                 // Tiling extensions
                 'tiling', 'tilingshell', 'forge', 'pop-shell',
                 // System monitor extensions (shrink on GNOME < 49)
-                'system-monitor', 'system_monitor', 'vitals', 'tophat', 'astra-monitor',
+                'system-monitor', 'system_monitor', 'vitals', 'tophat',
                 // AppIndicator/tray extensions (shrink on GNOME < 49)
                 'appindicator', 'ubuntu-appindicator', 'kstatusnotifier', 'tray',
                 // ArcMenu (squished icon fix) - checks loose 'arc' to catch variations
@@ -318,6 +333,206 @@ export const MirroredIndicatorButton = GObject.registerClass(
             });
 
             parent.add_child(clone);
+        }
+
+        _createAstraMultiComponentClone(source) {
+            const root = new St.BoxLayout({
+                style_class: source.get_style_class_name() || 'panel-status-menu-box',
+                y_align: Clutter.ActorAlign.FILL,
+                y_expand: true,
+            });
+
+            // Prevent outer wrapper (this) from swallowing all pointer events,
+            // dropping monolithic hover block while retaining alignment.
+            this.reactive = false;
+            this.track_hover = false;
+            
+            const children = source.get_children ? source.get_children() : [];
+            if (children.length === 0) {
+                // Base clone fallback if structure not as expected
+                this._createSimpleClone(root, source);
+                this.add_child(root);
+                return;
+            }
+
+            for (const child of children) {
+                // Skip components hidden by Astra's config
+                if (child.visible === false) continue;
+
+                // Create transparent proxy wrapper sized exactly like the sub-child
+                const proxy = new St.Button({
+                    reactive: child.reactive !== false, 
+                    track_hover: child.track_hover !== false,
+                    style_class: child.get_style_class_name ? child.get_style_class_name() : 'panel-button',
+                    y_expand: true,
+                    y_align: Clutter.ActorAlign.FILL,
+                    x_expand: child.x_expand !== false,
+                    layout_manager: new Clutter.BinLayout()
+                });
+
+                // Keep proxy visibly synced with the source component dynamically
+                const visId = child.connect('notify::visible', () => {
+                    proxy.visible = child.visible;
+                });
+                
+                this.connect('destroy', () => {
+                    if (child && visId) {
+                        try { child.disconnect(visId); } catch(e) {}
+                    }
+                });
+
+                // Clone paints the visuals
+                const clone = new Clutter.Clone({
+                    source: child,
+                    x_align: Clutter.ActorAlign.FILL,
+                    y_align: Clutter.ActorAlign.FILL
+                });
+                proxy.add_child(clone);
+
+                // Pipe component-specific interactions
+                this._setupAstraProxyEvents(proxy, child);
+                root.add_child(proxy);
+            }
+
+            this.add_child(root);
+            this._astraProxyContainer = root;
+        }
+
+        _setupAstraProxyEvents(proxy, targetChild) {
+            if (!proxy.reactive) return;
+
+            // Hover sync: triggers Astra's component-specific hover paint
+            proxy.connect('notify::hover', () => {
+                if (proxy.hover) {
+                    targetChild.add_style_pseudo_class('hover');
+                    proxy.add_style_pseudo_class('hover');
+                } else {
+                    targetChild.remove_style_pseudo_class('hover');
+                    proxy.remove_style_pseudo_class('hover');
+                }
+            });
+
+            // Active sync
+            proxy.connect('notify::active', () => {
+                if (proxy.active) {
+                    targetChild.add_style_pseudo_class('active');
+                } else {
+                    targetChild.remove_style_pseudo_class('active');
+                }
+            });
+
+            // Direct event forwarding for the explicit component
+            const forwardSpec = (eventName, vfuncName, event) => {
+                let handled = false;
+                
+                // If it is a click/press and it has its own menu, orchestrate the open locally
+                if ((eventName === 'button-press-event' || eventName === 'touch-event') && (targetChild.menu || targetChild._menu)) {
+                    if (this._openAstraProxyMenu(proxy, targetChild)) {
+                        return Clutter.EVENT_STOP;
+                    }
+                }
+
+                const vfunc = targetChild[vfuncName];
+                if (typeof vfunc === 'function') {
+                    try {
+                        const result = vfunc.call(targetChild, event);
+                        if (result === Clutter.EVENT_STOP) handled = true;
+                    } catch (e) {}
+                }
+
+                if (!handled && typeof targetChild.emit === 'function') {
+                    try {
+                        targetChild.emit(eventName, event);
+                        handled = true;
+                    } catch (e) {}
+                }
+                
+                return handled ? Clutter.EVENT_STOP : Clutter.EVENT_PROPAGATE;
+            };
+
+            proxy.connect('button-press-event', (_, event) => forwardSpec('button-press-event', 'vfunc_button_press_event', event));
+            proxy.connect('button-release-event', (_, event) => forwardSpec('button-release-event', 'vfunc_button_release_event', event));
+            proxy.connect('scroll-event', (_, event) => forwardSpec('scroll-event', 'vfunc_scroll_event', event));
+            proxy.connect('touch-event', (_, event) => forwardSpec('touch-event', 'vfunc_touch_event', event));
+        }
+
+        _openAstraProxyMenu(proxy, targetChild) {
+            const monitorIndex = Main.layoutManager.findIndexForActor(this);
+            const menu = targetChild.menu || targetChild._menu;
+            
+            if (!menu || menu.isOpen === undefined) return false;
+
+            let originalSourceActor = menu.sourceActor;
+            let originalBoxPointer = menu.box?._sourceActor;
+            let originalSetActive = targetChild.setActive?.bind(targetChild);
+            let originalAddPseudoClass = targetChild.add_style_pseudo_class?.bind(targetChild);
+
+            let menuBoxState = null;
+            let openStateId = 0;
+
+            if (menu.isOpen) {
+                menu.close();
+                return true;
+            }
+
+            // Prevent active state on main panel indicator
+            if (targetChild.setActive) {
+                targetChild.setActive = () => { };
+            }
+            if (targetChild.add_style_pseudo_class) {
+                const orig = targetChild.add_style_pseudo_class.bind(targetChild);
+                targetChild.add_style_pseudo_class = (p) => {
+                    if (p !== 'active' && p !== 'checked') orig(p);
+                };
+            }
+            if (targetChild.remove_style_pseudo_class) {
+                targetChild.remove_style_pseudo_class('active');
+                targetChild.remove_style_pseudo_class('checked');
+            }
+
+            // Activate proxy
+            proxy.add_style_pseudo_class('active');
+            proxy.add_style_pseudo_class('checked');
+
+            menu.sourceActor = proxy;
+
+            if (menu.box) {
+                menuBoxState = this._updateMenuPositioning(menu, monitorIndex);
+                menu.box._sourceActor = proxy;
+            }
+
+            openStateId = menu.connect('open-state-changed', (m, isOpen) => {
+                if (isOpen) {
+                    proxy.add_style_pseudo_class('active');
+                    proxy.add_style_pseudo_class('checked');
+                } else {
+                    if (originalSourceActor) menu.sourceActor = originalSourceActor;
+                    if (menu.box && originalBoxPointer) menu.box._sourceActor = originalBoxPointer;
+                    if (originalSetActive) targetChild.setActive = originalSetActive;
+                    if (originalAddPseudoClass) targetChild.add_style_pseudo_class = originalAddPseudoClass;
+
+                    if (menu.box && menuBoxState) {
+                        if (menuBoxState.originalSetPosition) menu.box.setPosition = menuBoxState.originalSetPosition;
+                        if (menuBoxState.removedConstraints?.length > 0) {
+                            menuBoxState.removedConstraints.forEach(c => menu.box.add_constraint(c));
+                        }
+                    }
+
+                    if (targetChild.remove_style_pseudo_class) {
+                        targetChild.remove_style_pseudo_class('active');
+                        targetChild.remove_style_pseudo_class('checked');
+                    }
+                    if (proxy.remove_style_pseudo_class) {
+                        proxy.remove_style_pseudo_class('active');
+                        proxy.remove_style_pseudo_class('checked');
+                    }
+
+                    menu.disconnect(openStateId);
+                }
+            });
+
+            menu.open();
+            return true;
         }
 
         _createQuickSettingsClone(parent, source) {
