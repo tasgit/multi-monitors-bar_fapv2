@@ -381,10 +381,6 @@ export const MirroredIndicatorButton = GObject.registerClass(
                     }
                     // Restore source state modified by _setupAstraProxyEvents
                     try {
-                        if (child._mmp_origTrackHover) {
-                            child.track_hover = true;
-                            child._mmp_origTrackHover = false;
-                        }
                         if (child._mmp_tooltipHooked && child.tooltipMenu) {
                             if (child.tooltipMenu._mmp_origOpen) {
                                 child.tooltipMenu.open = child.tooltipMenu._mmp_origOpen;
@@ -398,9 +394,13 @@ export const MirroredIndicatorButton = GObject.registerClass(
                     } catch(e) {}
                 });
 
-                // Clone paints the visuals
+                // Clone the inner content (child.box) instead of the outer widget.
+                // This way the clone shows data (icons, graphs, labels) without the
+                // panel-button hover background, so Clutter.Clone doesn't bleed the
+                // source's :hover visual to the extended monitor.
+                const cloneSource = child.box || child;
                 const clone = new Clutter.Clone({
-                    source: child,
+                    source: cloneSource,
                     x_align: Clutter.ActorAlign.FILL,
                     y_align: Clutter.ActorAlign.FILL
                 });
@@ -418,16 +418,9 @@ export const MirroredIndicatorButton = GObject.registerClass(
         _setupAstraProxyEvents(proxy, targetChild) {
             if (!proxy.reactive) return;
 
-            // ── Fix 1: Prevent hover visual bleed from main → extended ──
-            // Clutter.Clone mirrors the source's visual state. If the source gets
-            // :hover pseudo-class (from track_hover), the clone on the extended
-            // monitor shows it too. Disable track_hover on the source to prevent this.
-            // Astra's tooltips are driven by enter/leave-event signals (not track_hover),
-            // so they continue working on the main monitor.
-            if (targetChild.track_hover) {
-                targetChild._mmp_origTrackHover = true;
-                targetChild.track_hover = false;
-            }
+            // Hover visual is handled by cloning child.box (inner content) instead
+            // of child (outer panel-button). This decouples hover: the proxy provides
+            // its own panel-button:hover, and the clone only shows data content.
 
             // ── Fix 2: Hook tooltipMenu to redirect positioning to extended monitor ──
             if (targetChild.tooltipMenu && !targetChild._mmp_tooltipHooked) {
