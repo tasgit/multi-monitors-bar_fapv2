@@ -379,6 +379,23 @@ export const MirroredIndicatorButton = GObject.registerClass(
                     if (child && visId) {
                         try { child.disconnect(visId); } catch(e) {}
                     }
+                    // Restore source state modified by _setupAstraProxyEvents
+                    try {
+                        if (child._mmp_origTrackHover) {
+                            child.track_hover = true;
+                            child._mmp_origTrackHover = false;
+                        }
+                        if (child._mmp_tooltipHooked && child.tooltipMenu) {
+                            if (child.tooltipMenu._mmp_origOpen) {
+                                child.tooltipMenu.open = child.tooltipMenu._mmp_origOpen;
+                            }
+                            if (child.tooltipMenu._mmp_origClose) {
+                                child.tooltipMenu.close = child.tooltipMenu._mmp_origClose;
+                            }
+                            child._mmp_tooltipHooked = false;
+                        }
+                        child._mmp_proxyHovering = false;
+                    } catch(e) {}
                 });
 
                 // Clone paints the visuals
@@ -401,52 +418,102 @@ export const MirroredIndicatorButton = GObject.registerClass(
         _setupAstraProxyEvents(proxy, targetChild) {
             if (!proxy.reactive) return;
 
-            // Hover sync: triggers Astra's component-specific hover paint
-            proxy.connect('notify::hover', () => {
-                if (proxy.hover) {
-                    targetChild.add_style_pseudo_class('hover');
-                    proxy.add_style_pseudo_class('hover');
-                } else {
-                    targetChild.remove_style_pseudo_class('hover');
-                    proxy.remove_style_pseudo_class('hover');
+            // ── Fix 1: Prevent hover visual bleed from main → extended ──
+            // Clutter.Clone mirrors the source's visual state. If the source gets
+            // :hover pseudo-class (from track_hover), the clone on the extended
+            // monitor shows it too. Disable track_hover on the source to prevent this.
+            // Astra's tooltips are driven by enter/leave-event signals (not track_hover),
+            // so they continue working on the main monitor.
+            if (targetChild.track_hover) {
+                targetChild._mmp_origTrackHover = true;
+                targetChild.track_hover = false;
+            }
+
+            // ── Fix 2: Hook tooltipMenu to redirect positioning to extended monitor ──
+            if (targetChild.tooltipMenu && !targetChild._mmp_tooltipHooked) {
+                targetChild._mmp_tooltipHooked = true;
+                const tooltipMenu = targetChild.tooltipMenu;
+                const origTooltipSource = tooltipMenu.sourceActor;
+
+                const origOpen = tooltipMenu.open.bind(tooltipMenu);
+                tooltipMenu._mmp_origOpen = origOpen;
+                tooltipMenu.open = (animate) => {
+                    if (targetChild._mmp_proxyHovering) {
+                        // Redirect tooltip to extended monitor by swapping sourceActor
+                        // to the proxy. BoxPointer uses sourceActor to calculate position.
+                        tooltipMenu.sourceActor = proxy;
+                    }
+                    origOpen(animate);
+                };
+
+                const origClose = tooltipMenu.close.bind(tooltipMenu);
+                tooltipMenu._mmp_origClose = origClose;
+                tooltipMenu.close = (animate) => {
+                    origClose(animate);
+                    // Always restore original source so main monitor tooltips still work
+                    tooltipMenu.sourceActor = origTooltipSource;
+                };
+            }
+
+            // ── Fix 3: Proxy enter/leave → show/hide tooltip on extended monitor ──
+            // Astra Monitor shows tooltips via enter-event/leave-event handlers
+            // on the Header (see header.js lines 75-80). We replicate this by
+            // directly calling showTooltip()/hideTooltip() when the proxy is
+            // hovered, with a flag so our tooltipMenu.open hook knows to redirect.
+            proxy.connect('enter-event', () => {
+                targetChild._mmp_proxyHovering = true;
+                if (typeof targetChild.showTooltip === 'function') {
+                    targetChild.showTooltip();
                 }
+                return Clutter.EVENT_PROPAGATE;
             });
 
-            // Active sync
+            proxy.connect('leave-event', () => {
+                targetChild._mmp_proxyHovering = false;
+                if (typeof targetChild.hideTooltip === 'function') {
+                    targetChild.hideTooltip();
+                }
+                return Clutter.EVENT_PROPAGATE;
+            });
+
+            // Active sync (proxy only — don't propagate to source)
             proxy.connect('notify::active', () => {
                 if (proxy.active) {
-                    targetChild.add_style_pseudo_class('active');
+                    proxy.add_style_pseudo_class('active');
                 } else {
-                    targetChild.remove_style_pseudo_class('active');
+                    proxy.remove_style_pseudo_class('active');
                 }
             });
 
-            // Direct event forwarding for the explicit component
+            // Click/scroll event forwarding (NOT enter/leave — those are handled above)
             const forwardSpec = (eventName, vfuncName, event) => {
                 let handled = false;
-                
-                // If it is a click/press and it has its own menu, orchestrate the open locally
+
                 if ((eventName === 'button-press-event' || eventName === 'touch-event') && (targetChild.menu || targetChild._menu)) {
                     if (this._openAstraProxyMenu(proxy, targetChild)) {
                         return Clutter.EVENT_STOP;
                     }
                 }
 
-                const vfunc = targetChild[vfuncName];
-                if (typeof vfunc === 'function') {
-                    try {
-                        const result = vfunc.call(targetChild, event);
-                        if (result === Clutter.EVENT_STOP) handled = true;
-                    } catch (e) {}
+                try {
+                    targetChild._mmp_inForwardSpec = true;
+                    const vfunc = targetChild[vfuncName];
+                    if (typeof vfunc === 'function') {
+                        try {
+                            const result = vfunc.call(targetChild, event);
+                            if (result === Clutter.EVENT_STOP) handled = true;
+                        } catch (e) {}
+                    }
+                    if (!handled && typeof targetChild.emit === 'function') {
+                        try {
+                            targetChild.emit(eventName, event);
+                            handled = true;
+                        } catch (e) {}
+                    }
+                } finally {
+                    targetChild._mmp_inForwardSpec = false;
                 }
 
-                if (!handled && typeof targetChild.emit === 'function') {
-                    try {
-                        targetChild.emit(eventName, event);
-                        handled = true;
-                    } catch (e) {}
-                }
-                
                 return handled ? Clutter.EVENT_STOP : Clutter.EVENT_PROPAGATE;
             };
 
@@ -1186,12 +1253,13 @@ export const MirroredIndicatorButton = GObject.registerClass(
                 // Calculate position manually
                 const [btnX, btnY] = sourceActor.get_transformed_position();
                 const [btnW, btnH] = sourceActor.get_transformed_size();
-                const [menuW, menuH] = this.get_preferred_size(); // Get preferred size (min, nat)
-                const finalMenuW = menuW[1]; // Use natural width
+                const prefW = this.get_preferred_width(-1);
+                const prefH = this.get_preferred_height(-1);
+                const finalMenuW = prefW[1]; // Use natural width
                 // Height might be dynamic, use current size or preferred?
                 // BoxPointer usually has size by now.
                 const [currW, currH] = this.get_size();
-                const finalMenuH = currH > 0 ? currH : menuH[1];
+                const finalMenuH = currH > 0 ? currH : prefH[1];
 
                 // Center horizontally on the button
                 let newX = btnX + (btnW / 2) - (finalMenuW / 2);
