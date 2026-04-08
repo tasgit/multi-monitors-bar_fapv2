@@ -47,6 +47,7 @@ export const SHOW_DATE_TIME_ID = Constants.SHOW_DATE_TIME_ID;
 export const AVAILABLE_INDICATORS_ID = Constants.AVAILABLE_INDICATORS_ID;
 export const TRANSFER_INDICATORS_ID = Constants.TRANSFER_INDICATORS_ID;
 export const EXCLUDE_INDICATORS_ID = Constants.EXCLUDE_INDICATORS_ID;
+export const PANEL_COLOR_ID = 'panel-color';
 
 
 const MultiMonitorsAppMenuButton = GObject.registerClass(
@@ -360,6 +361,11 @@ const MultiMonitorsPanel = GObject.registerClass(
             // Watch for late-loading extensions (like Apps and Places)
             this._startExtensionWatcher();
 
+            // Apply custom panel color
+            this._panelColorId = this._settings.connect('changed::' + PANEL_COLOR_ID,
+                this._applyPanelColor.bind(this));
+            this._applyPanelColor();
+
             this.connect('destroy', this.destroy.bind(this));
         }
 
@@ -445,6 +451,10 @@ const MultiMonitorsPanel = GObject.registerClass(
                 this._settings.disconnect(this._showDateTimeId);
                 this._showDateTimeId = null;
             }
+            if (this._panelColorId) {
+                this._settings.disconnect(this._panelColorId);
+                this._panelColorId = null;
+            }
 
             Main.ctrlAltTabManager.removeGroup(this);
 
@@ -489,6 +499,15 @@ const MultiMonitorsPanel = GObject.registerClass(
                     indicator.destroy();
                     delete this.statusArea[name];
                 }
+            }
+        }
+
+        _applyPanelColor() {
+            let color = this._settings.get_string(PANEL_COLOR_ID);
+            if (color && color !== '') {
+                this.set_style('background-color: ' + color + ' !important;');
+            } else {
+                this.set_style(null);
             }
         }
 

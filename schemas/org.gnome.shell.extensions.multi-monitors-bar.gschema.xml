@@ -92,5 +92,13 @@
         monitors. Disabling this completely hides the overview from secondary displays.</description>
     </key>
 
+    <key name="panel-color" type="s">
+      <default>''</default>
+      <summary>Custom panel background color for additional monitors.</summary>
+      <description>An RGBA color string (e.g. 'rgba(45,45,45,0.9)') to use as the background
+        color for panels on additional monitors. An empty string means use the default system
+        theme color.</description>
+    </key>
+
   </schema>
 </schemalist>
