@@ -55,12 +55,41 @@ export class MultiMonitorsPanelBox {
 		Main.layoutManager.addChrome(this.panelBox, { affectsStruts: true, trackFullscreen: true });
 		this.panelBox.set_position(monitor.x, monitor.y);
 
-		// Get main panel height to match it exactly
-		const mainPanelHeight = Main.layoutManager.panelBox.height;
-		// Lock the height instead of using -1 (auto)
-		this.panelBox.set_size(monitor.width, mainPanelHeight > 0 ? mainPanelHeight : 30);
+		// Capture a stable panel height that won't fluctuate during overview or
+		// fullscreen transitions on the main monitor.
+		this._stableHeight = this._getStablePanelHeight();
+		this.panelBox.set_size(monitor.width, this._stableHeight);
 
 		Main.uiGroup.set_child_below_sibling(this.panelBox, Main.layoutManager.panelBox);
+	}
+
+	/**
+	 * Get a stable panel height that doesn't change during overview/fullscreen.
+	 * Tries multiple sources in order of reliability:
+	 * 1. Main.panel's natural preferred height (theme-defined, stable)
+	 * 2. Main.layoutManager.panelBox.height (only if > 0 and not mid-animation)
+	 * 3. Hardcoded fallback of 30px
+	 */
+	_getStablePanelHeight() {
+		// 1. Try to get the panel's natural preferred height from its theme node
+		//    This is the CSS-defined height and doesn't change during animations
+		try {
+			if (Main.panel) {
+				const [, natHeight] = Main.panel.get_preferred_height(-1);
+				if (natHeight > 0)
+					return natHeight;
+			}
+		} catch (e) {
+			// Fallthrough
+		}
+
+		// 2. Try panelBox height (may be 0 during fullscreen or animations)
+		const panelBoxHeight = Main.layoutManager.panelBox.height;
+		if (panelBoxHeight > 0)
+			return panelBoxHeight;
+
+		// 3. Hardcoded fallback
+		return 30;
 	}
 
 	destroy() {
@@ -76,10 +105,11 @@ export class MultiMonitorsPanelBox {
 
 	updatePanel(monitor) {
 		this.panelBox.set_position(monitor.x, monitor.y);
-		// Get main panel height to match it exactly
-		const mainPanelHeight = Main.layoutManager.panelBox.height;
-		// Lock the height instead of using -1 (auto)
-		this.panelBox.set_size(monitor.width, mainPanelHeight > 0 ? mainPanelHeight : 30);
+		// Re-check the stable height (only updates if we get a valid new value)
+		const newHeight = this._getStablePanelHeight();
+		if (newHeight > 0)
+			this._stableHeight = newHeight;
+		this.panelBox.set_size(monitor.width, this._stableHeight);
 	}
 }
 

@@ -313,7 +313,9 @@ export const MirroredIndicatorButton = GObject.registerClass(
                 // AppIndicator/tray extensions (shrink on GNOME < 49)
                 'appindicator', 'ubuntu-appindicator', 'kstatusnotifier', 'tray',
                 // ArcMenu (squished icon fix) - checks loose 'arc' to catch variations
-                'arcmenu', 'arc-menu', 'arc'
+                'arcmenu', 'arc-menu', 'arc',
+                // Clipboard extensions (resize during overview/fullscreen)
+                'clipboard', 'clipboard-indicator', 'clipman',
             ];
             const isProblematic = problematicExtensions.some(name =>
                 this._role && this._role.toLowerCase().includes(name)
